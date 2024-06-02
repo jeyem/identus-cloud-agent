@@ -90,8 +90,6 @@ services:
       API_KEY_AUTHENTICATE_AS_DEFAULT_USER:
       API_KEY_AUTO_PROVISIONING:
     depends_on:
-      db:
-        condition: service_healthy
       prism-node:
         condition: service_started
       vault-server:
