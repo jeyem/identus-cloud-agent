@@ -31,7 +31,6 @@ object IssueBackgroundJobs extends BackgroundJobsHelper {
           IssueCredentialRecord.ProtocolState.CredentialPending,
           IssueCredentialRecord.ProtocolState.CredentialGenerated
         )
-        .mapError(err => Throwable(s"Error occurred while getting Issue Credential records: $err"))
       _ <- ZIO
         .foreachPar(records)(performIssueCredentialExchange)
         .withParallelism(config.pollux.issueBgJobProcessingParallelism)
@@ -42,7 +41,7 @@ object IssueBackgroundJobs extends BackgroundJobsHelper {
     .counterInt(key)
     .fromConst(1)
 
-  private[this] def performIssueCredentialExchange(record: IssueCredentialRecord) = {
+  private def performIssueCredentialExchange(record: IssueCredentialRecord) = {
     import IssueCredentialRecord.*
     import IssueCredentialRecord.ProtocolState.*
 
@@ -222,12 +221,12 @@ object IssueBackgroundJobs extends BackgroundJobsHelper {
             ) =>
           val holderPendingToGeneratedFlow = for {
             walletAccessContext <- buildWalletAccessContextLayer(offer.to)
-            result <- (for {
+            result <- for {
               credentialService <- ZIO.service[CredentialService]
               _ <- credentialService
                 .generateJWTCredentialRequest(id)
                 .provideSomeLayer(ZLayer.succeed(walletAccessContext))
-            } yield ()).mapError(e => (walletAccessContext, handleCredentialErrors(e)))
+            } yield ()
           } yield result
 
           holderPendingToGeneratedFlow @@ HolderPendingToGeneratedSuccess.trackSuccess
@@ -263,12 +262,12 @@ object IssueBackgroundJobs extends BackgroundJobsHelper {
             ) =>
           val holderPendingToGeneratedFlow = for {
             walletAccessContext <- buildWalletAccessContextLayer(offer.to)
-            result <- (for {
+            result <- for {
               credentialService <- ZIO.service[CredentialService]
               _ <- credentialService
                 .generateSDJWTCredentialRequest(id)
                 .provideSomeLayer(ZLayer.succeed(walletAccessContext))
-            } yield ()).mapError(e => (walletAccessContext, handleCredentialErrors(e)))
+            } yield ()
           } yield result
 
           holderPendingToGeneratedFlow @@ HolderPendingToGeneratedSuccess.trackSuccess
@@ -304,12 +303,12 @@ object IssueBackgroundJobs extends BackgroundJobsHelper {
             ) =>
           val holderPendingToGeneratedFlow = for {
             walletAccessContext <- buildWalletAccessContextLayer(offer.to)
-            result <- (for {
+            result <- for {
               credentialService <- ZIO.service[CredentialService]
               _ <- credentialService
                 .generateAnonCredsCredentialRequest(id)
                 .provideSomeLayer(ZLayer.succeed(walletAccessContext))
-            } yield ()).mapError(e => (walletAccessContext, handleCredentialErrors(e)))
+            } yield ()
           } yield result
 
           holderPendingToGeneratedFlow @@ HolderPendingToGeneratedSuccess.trackSuccess
@@ -495,7 +494,7 @@ object IssueBackgroundJobs extends BackgroundJobsHelper {
               credentialService <- ZIO.service[CredentialService]
               config <- ZIO.service[AppConfig]
               _ <- credentialService
-                .generateSDJWTCredential(id)
+                .generateSDJWTCredential(id, config.pollux.credentialSdJwtExpirationTime)
                 .provideSomeLayer(ZLayer.succeed(walletAccessContext))
             } yield ()).mapError(e => (walletAccessContext, e))
           } yield result
@@ -617,12 +616,6 @@ object IssueBackgroundJobs extends BackgroundJobsHelper {
               _ <- credentialService
                 .reportProcessingFailure(record.id, Some(e.toString))
                 .provideSomeLayer(ZLayer.succeed(walletAccessContext))
-                .tapError(err =>
-                  ZIO.logErrorCause(
-                    s"Issue Credential - failed to report processing failure: ${record.id}",
-                    Cause.fail(err)
-                  )
-                )
             } yield ()
 
         }
@@ -632,12 +625,6 @@ object IssueBackgroundJobs extends BackgroundJobsHelper {
         ZIO.logErrorCause(s"Issue Credential - Defect processing record: ${record.id}", Cause.fail(d))
       )
 
-  }
-
-  private[this] def handleCredentialErrors
-      : PartialFunction[Throwable | CredentialServiceError, CredentialServiceError] = {
-    case e: CredentialServiceError => e
-    case t: Throwable              => CredentialServiceError.UnexpectedError(t.getMessage())
   }
 
 }

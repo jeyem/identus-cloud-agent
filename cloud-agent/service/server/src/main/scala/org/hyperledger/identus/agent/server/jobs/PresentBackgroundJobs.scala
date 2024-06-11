@@ -21,10 +21,9 @@ import org.hyperledger.identus.mercury.protocol.reportproblem.v2.*
 import org.hyperledger.identus.pollux.core.model.*
 import org.hyperledger.identus.pollux.core.model.error.{CredentialServiceError, PresentationError}
 import org.hyperledger.identus.pollux.core.model.error.PresentationError.*
-import org.hyperledger.identus.pollux.core.model.presentation.SdJwtPresentationPayload
 import org.hyperledger.identus.pollux.core.service.{CredentialService, PresentationService}
 import org.hyperledger.identus.pollux.core.service.serdes.AnoncredCredentialProofsV1
-import org.hyperledger.identus.pollux.sdjwt.{IssuerPublicKey, SDJWT}
+import org.hyperledger.identus.pollux.sdjwt.{IssuerPublicKey, PresentationCompact, SDJWT}
 import org.hyperledger.identus.pollux.vc.jwt.{DidResolver as JwtDidResolver, JWT, JwtPresentation}
 import org.hyperledger.identus.resolvers.DIDResolver
 import org.hyperledger.identus.shared.http.*
@@ -67,7 +66,7 @@ object PresentBackgroundJobs extends BackgroundJobsHelper {
     .counterInt(key)
     .fromConst(1)
 
-  private[this] def createPrismDIDIssuerFromPresentationCredentials(
+  private def createPrismDIDIssuerFromPresentationCredentials(
       presentationId: DidCommID,
       credentialsToUse: Seq[String]
   ) =
@@ -84,12 +83,10 @@ object PresentBackgroundJobs extends BackgroundJobsHelper {
         .attempt(DidCommID(credentialRecordId))
         .mapError(_ => PresentationError.UnexpectedError(s"$credentialRecordId is not a valid DidCommID"))
       vcSubjectId <- credentialService
-        .getIssueCredentialRecord(credentialRecordUuid)
-        .someOrFail(CredentialServiceError.RecordIdNotFound(credentialRecordUuid))
+        .findById(credentialRecordUuid)
+        .someOrFail(CredentialServiceError.RecordNotFound(credentialRecordUuid))
         .map(_.subjectId)
-        .someOrFail(
-          CredentialServiceError.UnexpectedError(s"VC SubjectId not found in credential record: $credentialRecordUuid")
-        )
+        .someOrElseZIO(ZIO.dieMessage(s"VC SubjectId not found in credential record: $credentialRecordUuid"))
       proverDID <- ZIO
         .fromEither(PrismDID.fromString(vcSubjectId))
         .mapError(e =>
@@ -104,7 +101,7 @@ object PresentBackgroundJobs extends BackgroundJobsHelper {
 
   // Holder / Prover Get the Holder/Prover PrismDID from the IssuedCredential
   // When holder accepts offer he provides the subjectdid
-  private[this] def getPrismDIDForHolderFromCredentials(
+  private def getPrismDIDForHolderFromCredentials(
       presentationId: DidCommID,
       credentialsToUse: Seq[String]
   ) =
@@ -121,12 +118,10 @@ object PresentBackgroundJobs extends BackgroundJobsHelper {
         .attempt(DidCommID(credentialRecordId))
         .mapError(_ => PresentationError.UnexpectedError(s"$credentialRecordId is not a valid DidCommID"))
       vcSubjectId <- credentialService
-        .getIssueCredentialRecord(credentialRecordUuid)
-        .someOrFail(CredentialServiceError.RecordIdNotFound(credentialRecordUuid))
+        .findById(credentialRecordUuid)
+        .someOrFail(CredentialServiceError.RecordNotFound(credentialRecordUuid))
         .map(_.subjectId)
-        .someOrFail(
-          CredentialServiceError.UnexpectedError(s"VC SubjectId not found in credential record: $credentialRecordUuid")
-        )
+        .someOrElseZIO(ZIO.dieMessage(s"VC SubjectId not found in credential record: $credentialRecordUuid"))
       proverDID <- ZIO
         .fromEither(PrismDID.fromString(vcSubjectId))
         .mapError(e =>
@@ -139,7 +134,7 @@ object PresentBackgroundJobs extends BackgroundJobsHelper {
       jwtIssuer <- getSDJwtIssuer(longFormPrismDID, VerificationRelationship.Authentication)
     } yield jwtIssuer
 
-  private[this] def performPresentProofExchange(record: PresentationRecord): URIO[
+  private def performPresentProofExchange(record: PresentationRecord): URIO[
     AppConfig & DidOps & DIDResolver & JwtDidResolver & HttpClient & PresentationService & CredentialService &
       DIDNonSecretStorage & DIDService & ManagedDIDService,
     Unit
@@ -687,7 +682,7 @@ object PresentBackgroundJobs extends BackgroundJobsHelper {
                     didResolverService <- ZIO.service[JwtDidResolver]
                     credentialsClaimsValidationResult <- p.attachments.head.data match {
                       case Base64(data) =>
-                        val base64Decoded = new String(java.util.Base64.getDecoder.decode(data))
+                        val base64Decoded = new String(java.util.Base64.getUrlDecoder.decode(data))
                         val maybePresentationOptions: Either[PresentationError, Option[
                           org.hyperledger.identus.pollux.core.model.presentation.Options
                         ]] =
@@ -837,28 +832,17 @@ object PresentBackgroundJobs extends BackgroundJobsHelper {
                     didResolverService <- ZIO.service[JwtDidResolver]
                     credentialsClaimsValidationResult <- p.attachments.head.data match {
                       case Base64(data) =>
-                        val base64Decoded = new String(java.util.Base64.getDecoder.decode(data))
+                        val base64Decoded = new String(java.util.Base64.getUrlDecoder.decode(data))
                         val verifiedClaims = for {
-                          sdJwtPresentationPayload <- ZIO.fromEither(base64Decoded.fromJson[SdJwtPresentationPayload])
-                          iss <- ZIO.fromEither(sdJwtPresentationPayload.presentation.iss)
+                          presentation <- ZIO.succeed(PresentationCompact.unsafeFromCompact(base64Decoded))
+                          iss <- ZIO.fromEither(presentation.iss)
                           ed25519PublicKey <- resolveToEd25519PublicKey(iss)
-                          verifiedClaims = SDJWT.getVerifiedClaims(
+                          ret = SDJWT.getVerifiedClaims(
                             IssuerPublicKey(ed25519PublicKey),
-                            sdJwtPresentationPayload.presentation,
-                            sdJwtPresentationPayload.claimsToDisclose.toJson
+                            presentation
                           )
-                          _ <- ZIO.logInfo(s"ClaimsValidationResult: $verifiedClaims")
-                          _ <- ZIO.logInfo(s"ClaimsValidationResult: ${sdJwtPresentationPayload.claimsToDisclose}")
-                          result: SDJWT.ClaimsValidationResult =
-                            verifiedClaims match {
-                              case validClaims: SDJWT.ValidClaims =>
-                                validClaims.verifyDiscoseClaims(
-                                  sdJwtPresentationPayload.claimsToDisclose.asObject.getOrElse(Json.Obj())
-                                )
-                              case validAnyMatch: SDJWT.ValidAnyMatch.type => validAnyMatch
-                              case invalid: SDJWT.Invalid                  => invalid
-                            }
-                        } yield result
+                          _ <- ZIO.logInfo(s"ClaimsValidationResult: $ret")
+                        } yield ret
                         verifiedClaims
                           .mapError(error =>
                             UnexpectedError(
@@ -1093,7 +1077,7 @@ object PresentBackgroundJobs extends BackgroundJobsHelper {
 
   }
 
-  private[this] def handlePresentationErrors: PartialFunction[
+  private def handlePresentationErrors: PartialFunction[
     Throwable | CredentialServiceError | PresentationError | BackgroundJobError,
     PresentationError | CredentialServiceError | BackgroundJobError
   ] = {
